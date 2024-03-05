@@ -20,40 +20,67 @@ class DoubleSlider(QSlider):
     # create our our signal that we can connect to if necessary
     doubleValueChanged = Signal(float)
 
-    def __init__(self, *args, decimals=3, **kwargs):
+    def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._multi = 10 ** decimals
+        self._maxi = 100
+        self._numticks = 20
+        self._minf = 0.
+        self._maxf = 1.
         self.valueChanged.connect(self.emitDoubleValueChanged)
+        super().setMinimum(0)
+        super().setMaximum(self._maxi)
+        self.setTickInterval()
+
+    @property
+    def _rangef(self):
+        minf, maxf = self._floatMinMax()
+        return maxf - minf
+
+    def _floatMinMax(self):
+        return self._minf, self._maxf
+
+    def _toFloat(self, val: int):
+        return float((val / self._maxi) * self._rangef)
+
+    def _toInt(self, val: float):
+        minf, _ = self._floatMinMax()
+        return int((val - minf) / self._rangef * self._maxi)
 
     def emitDoubleValueChanged(self):
-        value = float(super().value())/self._multi
-        self.doubleValueChanged.emit(value)
+        self.doubleValueChanged.emit(self.value())
 
     def value(self):
-        return float(super().value()) / self._multi
+        return self._toFloat(super().value())
 
     def minimum(self):
-        val = super().minimum()
-        return val / self._multi
+        return self._toFloat(super().minimum())
 
     def maximum(self):
-        val = super().maximum()
-        return val / self._multi
+        return self._toFloat(super().maximum())
 
-    def setMinimum(self, value):
-        return super().setMinimum(value * self._multi)
+    def setTickInterval(self, ti: int = 0) -> None:
+        super().setTickInterval(self._maxi / (self._numticks - 1))
 
-    def setMaximum(self, value):
-        return super().setMaximum(value * self._multi)
+    def setMinimum(self, value: float):
+        value_f = self.value()
+        self._minf = value
+        self._maxf = max(self._minf + 1e-5, self._maxf)
+        self.setValue(value_f)
 
-    def setSingleStep(self, value):
-        return super().setSingleStep(value * self._multi)
+    def setMaximum(self, value: float):
+        value_f = self.value()
+        self._maxf = value
+        self._minf = min(self._maxf - 1e-5, self._minf)
+        self.setValue(value_f)
 
-    def singleStep(self):
-        return float(super().singleStep()) / self._multi
+    # def setSingleStep(self, value: float):
+    #     super().setSingleStep(1)
 
-    def setValue(self, value):
-        super().setValue(int(value * self._multi))
+    # def singleStep(self):
+    #     return 1
+
+    def setValue(self, value: float):
+        super().setValue(self._toInt(value))
 
 
 class QNumericLabel(QLabel):
@@ -68,10 +95,12 @@ class QNumericLabel(QLabel):
             return ''
 
     @Slot(int)
-    @Slot(float)
     @Slot(complex)
     def setText(self, v):
-        super().setText(f"{self.prefix}{v}")
+        if isinstance(v, float):
+            super().setText(f"{self.prefix}{v:.3f}")
+        else:
+            super().setText(f"{self.prefix}{v}")
 
 
 def slider_config(slider: QSlider, value: int, vmin: int, vmax: int):
@@ -93,7 +122,7 @@ def labelled_slider(
     decimals: int = 0,
 ):
     if decimals > 0:
-        slider = DoubleSlider(QtCore.Qt.Orientation.Horizontal, decimals=decimals)
+        slider = DoubleSlider(QtCore.Qt.Orientation.Horizontal)
     else:
         slider = QSlider(QtCore.Qt.Orientation.Horizontal)
     slider_config(slider, value, vmin, vmax)
