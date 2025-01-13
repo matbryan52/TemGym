@@ -445,12 +445,6 @@ class TemGymWindow(QMainWindow):
         xyoffset = (0.2 * mid_z, -0.2 * mid_z)
         self.tem_window.setCameraParams(center=QVector3D(*xyoffset, mid_z))
 
-    @Slot()
-    def update_geometry(self):
-        return
-        for component in self.gui_components:
-            component.update_geometry()
-
 
 class ModelComponent(NamedTuple):
     name: str = "Model"
