@@ -1,6 +1,7 @@
-from typing import List, Iterable, TYPE_CHECKING, NamedTuple, Optional, Tuple
+from typing import Iterable, TYPE_CHECKING, NamedTuple, Optional, Tuple, Any
 from typing_extensions import Self
 import weakref
+import copy
 from contextlib import nullcontext, contextmanager
 
 from PySide6.QtGui import QVector3D
@@ -16,23 +17,26 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QLabel,
     QHBoxLayout,
-    QGroupBox,
     QCheckBox,
     QPushButton,
     QComboBox,
     QButtonGroup,
+    QTreeView,
 )
 from PySide6.QtGui import (
     QKeyEvent,
+    QStandardItemModel,
+    QStandardItem,
 )
 from pyqtgraph.dockarea import Dock, DockArea
 import pyqtgraph.opengl as gl
 import pyqtgraph as pg
-from superqt import QCollapsible
+from deepdiff import DeepDiff, extract, Delta
 
 import numpy as np
 
 from . import shapes as comp_geom
+from .config_model import to_model, ParamTuple
 from .utils import as_gl_lines, P2R, R2P
 from .widgets import labelled_slider, arrow_slider, LabelledIntField, GLImageItem, MyDockLabel
 
@@ -48,7 +52,7 @@ RAY_COLOR = (0., 0.8, 0.)
 XYZ_SCALING = np.asarray((1, 1, 1.))
 LENGTHSCALING = 1
 MRAD = 1e-3
-UPDATE_RATE = 50
+UPDATE_RATE = 100
 BKG_COLOR_3D = (150, 150, 150, 255)
 
 
@@ -168,9 +172,12 @@ class ComponentGUIWrapper:
     def __init__(self, component: 'comp.Component', window: 'TemGymWindow'):
         self.component = component
         self.window = weakref.ref(window)
-        self.box = QGroupBox(component.name)
-        self.table = QGroupBox(component.name)
+        self.box = None  # QGroupBox(component.name)
+        # self.table = QGroupBox(component.name)
         self.blocked = False
+
+    def get_parameters(self) -> dict[str, Any]:
+        return self.component.get_parameters()
 
     def update_geometry(self):
         pass
@@ -239,7 +246,7 @@ class TemGymWindow(QMainWindow):
     '''
     Create the UI Window
     '''
-    def __init__(self, model: 'Model'):
+    def __init__(self):
 
         '''Init important parameters
 
@@ -249,18 +256,18 @@ class TemGymWindow(QMainWindow):
             Microscope model
         '''
         super().__init__()
-        self.model = model
+        # self.model = model
 
-        self.gui_components: List[ComponentGUIWrapper] = []
-        # Loop through all components, and display the GUI for each
-        for component in self.model.components:
-            gui_component_c = component.gui_wrapper()
-            if gui_component_c is None:
-                continue
-            self.gui_components.append(
-                gui_component_c(component, self).build()
-            )
-        assert isinstance(self.gui_components[0], SourceGUI)
+        # self.gui_components: List[ComponentGUIWrapper] = []
+        # # Loop through all components, and display the GUI for each
+        # for component in self.model.components:
+        #     gui_component_c = component.gui_wrapper()
+        #     if gui_component_c is None:
+        #         continue
+        #     self.gui_components.append(
+        #         gui_component_c(component, self).build()
+        #     )
+        # assert isinstance(self.gui_components[0], SourceGUI)
 
         # Set some main window's properties
         self.setWindowTitle("TemGymBasic")
@@ -272,33 +279,136 @@ class TemGymWindow(QMainWindow):
         label = MyDockLabel("Detector")
         self.detector_dock = Dock("Detector", size=(4, 6), label=label)
         label = MyDockLabel("Controls")
-        self.gui_dock = Dock("Controls", size=(3.5, 10), label=label)
-        label = MyDockLabel("Detector controls")
-        self.det_control_dock = Dock("Detector controls", size=(4, 4), label=label)
+        self.gui_dock = Dock("Parameters", size=(3.5, 10), label=label)
+
+        self.params_tree = QTreeView()
+        self.params_tree.setAlternatingRowColors(True)
+        self.params_tree.setSortingEnabled(False)
+        self.params_tree.setHeaderHidden(False)
+        self.params_tree.setIndentation(10)
+        self._current_config = {}
+        self.gui_dock.addWidget(self.params_tree)
+        # label = MyDockLabel("Detector controls")
+        # self.det_control_dock = Dock("Detector controls", size=(4, 4), label=label)
         # self.table_dock = Dock("Parameter Table", size=(5, 5))
         self.centralWidget = DockArea()
         self.setCentralWidget(self.centralWidget)
         self.centralWidget.addDock(self.tem_dock, "left")
-        self.centralWidget.addDock(self.detector_dock, "right")
         self.centralWidget.addDock(self.gui_dock, "right")
-        self.centralWidget.addDock(self.det_control_dock, "bottom", self.detector_dock)
+        self.centralWidget.addDock(self.detector_dock, "bottom", self.gui_dock)
+        # self.centralWidget.addDock(self.det_control_dock, "bottom", self.detector_dock)
 
         # Create the display and the buttons
         self.create3DDisplay()
         self.createDetectorDisplay()
-        self.createGUI()
+        # self.createGUI()
 
         # Draw rays and det image
-        self.add_geometry()
-        self.update_rays()
+        # self.add_geometry()
+        # self.update_rays()
 
         # Any model-specific GUI setup called in finalize
-        self.model_gui.finalize(self)
+        # self.model_gui.finalize(self)
 
         # Update rays timer
-        self.rays_timer = QTimer(parent=self)
-        self.rays_timer.timeout.connect(self.update_rays)
-        self.rays_timer.start(UPDATE_RATE)
+        # self.rays_timer = QTimer(parent=self)
+        # self.rays_timer.timeout.connect(self.update_rays)
+        # self.rays_timer.start(UPDATE_RATE)
+        self._wobble_timer = QTimer(parent=self)
+        self._wobble_var = 0.
+        self._wobble_params = []
+        self._wobble_timer.timeout.connect(self._wobble_cb)
+
+    def set_model(
+        self,
+        model: 'Model',
+        tree: bool = True,
+        geometry: bool = True,
+        camera: bool = True
+    ):
+        gui_components = tuple(
+            c.gui_wrapper()(c, self) for c in model.components
+        )
+        if geometry:
+            self.add_geometry(gui_components)
+        if camera:
+            self.update_camera(gui_components)
+        if tree:
+            self.update_tree(gui_components)
+        num_rays = 64
+        self.update_rays(model, num_rays)
+
+    @staticmethod
+    def qtmodel_to_dict(model: QStandardItemModel):
+        params = []
+        for i in range(model.rowCount()):
+            component = model.item(i)
+            params.append({"type": component.text()})
+            for j in range(component.rowCount()):
+                key = component.child(j, 0)
+                value = component.child(j, 1)
+                try:
+                    py_val = eval(value.text(), {})
+                except (NameError, SyntaxError):
+                    py_val = value.text()
+                params[-1][key.text()] = ParamTuple(
+                    py_val,
+                    {
+                        'checked': key.checkState().value == 2,
+                    }
+                )
+        return params
+
+    @Slot()
+    def handleChanged(self, item: QStandardItem):
+        params = self.qtmodel_to_dict(item.model())
+        diff = DeepDiff(params, self._current_config)
+        self._current_config = params
+        param_change = False
+        for path, _ in diff.get("values_changed", {}).items():
+            if path.endswith("['checked']"):
+                base_path = path.replace(".meta['checked']", "")
+                if item.checkState().value == 2:
+                    self._wobble_params.append(base_path)
+                else:
+                    self._wobble_params = [k for k in self._wobble_params if k != base_path]
+                continue
+            param_change = True
+        if param_change:
+            new_model = to_model({"components": params})
+            self.set_model(new_model)
+        wobbling = self._wobble_timer.isActive()
+        if self._wobble_params and not wobbling:
+            self._wobble_timer.start(UPDATE_RATE)
+        elif not self._wobble_params and wobbling:
+            self._wobble_timer.stop()
+
+    def _wobble_cb(self):
+        if not self._wobble_params:
+            self._wobble_timer.stop()
+            return
+        self._wobble_var += np.pi / 8
+        self._wobble_var = np.angle(np.exp(1j * self._wobble_var))
+        param_mult = np.sin(self._wobble_var) * 0.1
+
+        temp_config = copy.deepcopy(self._current_config)
+        delta = {"values_changed": {}}
+        for wobble_path in self._wobble_params:
+            val_path = wobble_path + ".val"
+            val = extract(temp_config, val_path)
+            new_val = val + (val * param_mult)
+            delta["values_changed"][val_path] = {
+                "new_value": new_val,
+                "old_value": val,
+            }
+        delta = Delta(delta)
+        temp_config = temp_config + delta
+        new_model = to_model({"components": temp_config})
+        self.set_model(
+            new_model,
+            tree=False,
+            camera=False,
+        )
 
     def keyPressEvent(self, event: QKeyEvent):
         if event.key() in (Qt.Key_Escape, Qt.Key_Q):
@@ -312,35 +422,19 @@ class TemGymWindow(QMainWindow):
         self.tem_window.setBackgroundColor(BKG_COLOR_3D)
 
         # Get the model mean height to centre the camera origin
-        mean_z = sum(c.z for c in self.model.components) / len(self.model.components)
+        mean_z = 0.
         mean_z *= Z_ORIENT
 
         xyoffset = (0.2 * mean_z, -0.2 * mean_z)
         # Define Camera Parameters
-        self.initial_camera_params = {
+        initial_camera_params = {
             'center': QVector3D(*xyoffset, mean_z),
             'fov': 35,
             'azimuth': 45.0,
             'distance': 3.5 * abs(mean_z),
             'elevation': 25.0,
         }
-
-        self.x_camera_params = {
-            'center': QVector3D(0.0, 0.0, mean_z),
-            'fov': 25,
-            'azimuth': 90.0,
-            'distance': 5,
-            'elevation': 0.0,
-        }
-
-        self.y_camera_params = {
-            'center': QVector3D(0.0, 0.0, mean_z),
-            'fov': 25,
-            'azimuth': 0,
-            'distance': 5,
-            'elevation': 0.0,
-        }
-        self.tem_window.setCameraParams(**self.initial_camera_params)
+        self.tem_window.setCameraParams(**initial_camera_params)
 
         self.ray_geometry = gl.GLLinePlotItem(
             mode='lines',
@@ -349,15 +443,6 @@ class TemGymWindow(QMainWindow):
 
         # Add the window to the dock
         self.tem_dock.addWidget(self.tem_window)
-
-    def set_camera_x(self):
-        self.tem_window.setCameraParams(**self.x_camera_params)
-
-    def set_camera_y(self):
-        self.tem_window.setCameraParams(**self.y_camera_params)
-
-    def set_camera_initial(self):
-        self.tem_window.setCameraParams(**self.initial_camera_params)
 
     def createDetectorDisplay(self):
         '''Create the detector display
@@ -379,52 +464,52 @@ class TemGymWindow(QMainWindow):
     def createGUI(self):
         '''Create the gui display
         '''
-        self.model_gui = self.model.gui_wrapper()(window=self).build()
+        # self.model_gui = self.model.gui_wrapper()(window=self).build()
 
         # Layout is a VBox with stretch after
-        layout = QVBoxLayout()
-        for idx, gui_component in enumerate(self.gui_components[:-1]):
-            # Controls are held in accordion list-like collapsible stack
-            frame = QCollapsible(
-                gui_component.component.name,
-                collapsedIcon="▶",
-            )
-            frame._toggle_btn.setStyleSheet(
-                "text-align: left;"
-                "border: none;"
-                "outline: none;"
-                "font: bold 16px;"
-            )
-            frame.setDuration(0)
-            wgt = QWidget()
-            wgt.setLayout(gui_component.box)
-            frame.setContent(wgt)
-            if idx > 0:
-                frame.collapse(animate=False)
-            else:
-                frame.expand(animate=False)
-            layout.addWidget(frame)
-        layout.addStretch()
+        # layout = QVBoxLayout()
+        # for idx, gui_component in enumerate(self.gui_components[:-1]):
+        #     # Controls are held in accordion list-like collapsible stack
+        #     frame = QCollapsible(
+        #         gui_component.component.name,
+        #         collapsedIcon="▶",
+        #     )
+        #     frame._toggle_btn.setStyleSheet(
+        #         "text-align: left;"
+        #         "border: none;"
+        #         "outline: none;"
+        #         "font: bold 16px;"
+        #     )
+        #     frame.setDuration(0)
+        #     wgt = QWidget()
+        #     wgt.setLayout(gui_component.box)
+        #     frame.setContent(wgt)
+        #     if idx > 0:
+        #         frame.collapse(animate=False)
+        #     else:
+        #         frame.expand(animate=False)
+        #     layout.addWidget(frame)
+        # layout.addStretch()
 
-        # Wrap the VLayout in a scroll area and set it in the Dock
+        # # Wrap the VLayout in a scroll area and set it in the Dock
         scroll = QScrollArea()
         wgt = QWidget()
-        wgt.setLayout(layout)
+        # wgt.setLayout(layout)
         scroll.setWidget(wgt)
         scroll.setWidgetResizable(1)
         self.gui_dock.addWidget(scroll)
 
-        wgt = QWidget()
-        layout = self.gui_components[-1].box
-        layout.addStretch()
-        wgt.setLayout(layout)
-        self.det_control_dock.addWidget(wgt)
+        # wgt = QWidget()
+        # layout = self.gui_components[-1].box
+        # layout.addStretch()
+        # wgt.setLayout(layout)
+        # self.det_control_dock.addWidget(wgt)
 
     @Slot()
-    def update_rays(self):
+    def update_rays(self, model: 'Model', num_rays: int):
         try:
-            all_rays = tuple(self.model.run_iter(
-                self.gui_components[0].num_rays,
+            all_rays = tuple(model.run_iter(
+                num_rays,
             ))
         except IndexError:
             return
@@ -435,44 +520,75 @@ class TemGymWindow(QMainWindow):
             color=RAY_COLOR + (0.05,),
         )
 
-        if self.model.detector is not None:
+        image = model.detector.get_image(
+            all_rays,
+            interfere=False,
+        )
+        self.spot_img.setImage(np.abs(image.T) ** 2)
 
-            detector_gui = self.gui_components[-1]
-            image = self.model.detector.get_image(
-                all_rays,
-                interfere=detector_gui.interfere(),
-            )
-            if detector_gui is not None:
-                if detector_gui.display_type == 'amplitude':
-                    self.spot_img.setImage(np.abs(image.T))
-                elif detector_gui.display_type == 'phase':
-                    self.spot_img.setImage(np.angle(image.T))
-                elif detector_gui.display_type == 'intensity':
-                    self.spot_img.setImage(np.abs(image.T) ** 2)
-
-        try:
-            mempool = all_rays[-1].xp.get_default_memory_pool()
-            mempool.free_all_blocks()
-        except AttributeError:
+        if model.detector is not None:
             pass
 
-    def add_geometry(self):
+            # detector_gui = self.gui_components[-1]
+            # if detector_gui is not None:
+            #     if detector_gui.display_type == 'amplitude':
+            #         self.spot_img.setImage(np.abs(image.T))
+            #     elif detector_gui.display_type == 'phase':
+            #         self.spot_img.setImage(np.angle(image.T))
+            #     elif detector_gui.display_type == 'intensity':
+            #         self.spot_img.setImage(np.abs(image.T) ** 2)
+
+        # try:
+        #     mempool = all_rays[-1].xp.get_default_memory_pool()
+        #     mempool.free_all_blocks()
+        # except AttributeError:
+        #     pass
+
+    def update_tree(self, components: list[ComponentGUIWrapper]):
+        params_model = QStandardItemModel()
+        params_model.setHorizontalHeaderLabels(['Parameter', 'Value'])
+        params_model.itemChanged.connect(self.handleChanged)
+        for gui_comp in components:
+            comp_row = QStandardItem(type(gui_comp.component).__name__)
+            comp_row.setEditable(False)
+            for name, val in gui_comp.get_parameters().items():
+                key = QStandardItem(name)
+                key.setCheckable(True)
+                key.setEditable(False)
+                comp_row.appendRow([
+                    key,
+                    QStandardItem(f"{val}"),
+                ])
+            params_model.appendRow(comp_row)
+        self._current_config = self.qtmodel_to_dict(params_model)
+        self.params_tree.setModel(params_model)
+        self.params_tree.expandAll()
+
+    def add_geometry(self, components: list[ComponentGUIWrapper]):
         self.tem_window.clear()
         # Loop through all of the model components
         # and add their geometry to the TEM window.
         # FIXME Add in reverse to simulate better depth stacking
-        for component in reversed(self.gui_components):
+        for component in reversed(components):
             for geometry in component.get_geom():
                 self.tem_window.addItem(geometry)
         # Add labels next so they appear above geometry
-        for component in reversed(self.gui_components):
+        for component in reversed(components):
             label = component.get_label()
             self.tem_window.addItem(label)
         # Add the ray geometry last so it is always on top
         self.tem_window.addItem(self.ray_geometry)
 
+    def update_camera(self, components: list[ComponentGUIWrapper]):
+        z_vals = tuple(c.component.z for c in components)
+        mid_z = (min(z_vals) + max(z_vals)) / 2.
+        mid_z *= Z_ORIENT
+        xyoffset = (0.2 * mid_z, -0.2 * mid_z)
+        self.tem_window.setCameraParams(center=QVector3D(*xyoffset, mid_z))
+
     @Slot()
     def update_geometry(self):
+        return
         for component in self.gui_components:
             component.update_geometry()
 
@@ -1872,7 +1988,7 @@ class DoubleDeflectorGUI(ComponentGUIWrapper):
 
         vbox = QVBoxLayout()
         vbox.addLayout(hbox_labels)
-        self.table.setLayout(vbox)
+        # self.table.setLayout(vbox)
         return self
 
     def get_geom(self):

@@ -1,7 +1,7 @@
 import abc
 from typing import (
     Generator, Tuple, Optional, Type,
-    TYPE_CHECKING, Sequence, Union
+    TYPE_CHECKING, Sequence, Union, TypedDict
 )
 from dataclasses import dataclass, astuple
 
@@ -117,6 +117,11 @@ class LensAberrations:
         return any(s != 0 for s in self)
 
 
+class LensParams(TypedDict):
+    z: float
+    f: float
+
+
 class Lens(Component):
     def __init__(
         self,
@@ -135,6 +140,12 @@ class Lens(Component):
         if f is not None and (m is None and z1 is None and z2 is None):
             m = -1.0
         self._z1, self._z2, self._f, self._m = self._calculate_lens_parameters(z1, z2, f, m)
+
+    def get_parameters(self) -> LensParams:
+        return LensParams(
+            z=self.z,
+            f=self.f
+        )
 
     @property
     def f(self) -> float:
@@ -449,6 +460,11 @@ class Source(Component):
         )
 
 
+class ParallelBeamParameters(TypedDict):
+    z: float
+    radius: float
+
+
 class ParallelBeam(Source):
     def __init__(
         self,
@@ -461,6 +477,12 @@ class ParallelBeam(Source):
     ):
         super().__init__(z=z, tilt_yx=tilt_yx, name=name, voltage=voltage, centre_yx=centre_yx)
         self.radius = radius
+
+    def get_parameters(self) -> LensParams:
+        return ParallelBeamParameters(
+            z=self.z,
+            radius=self.radius,
+        )
 
     def get_rays(self, num_rays: int, random: Optional[bool] = None, backend='cpu') -> Rays:
         r = circular_beam(num_rays, self.radius,
@@ -598,6 +620,12 @@ class GaussBeam(Source):
         return GaussBeamGUI
 
 
+class DetectorParameters(TypedDict):
+    z: float
+    pixel_size: float
+    shape: tuple[int, int]
+
+
 class Detector(Component):
     def __init__(
         self,
@@ -631,6 +659,13 @@ class Detector(Component):
         self.flip_y = flip_y
         self.center = center
         self.buffer = None
+
+    def get_parameters(self) -> LensParams:
+        return DetectorParameters(
+            z=self.z,
+            pixel_size=self.pixel_size,
+            shape=self.shape,
+        )
 
     @property
     def rotation(self) -> Degrees:
