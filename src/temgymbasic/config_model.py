@@ -1,7 +1,7 @@
 import os
 import tomli
 from dataclasses import dataclass
-from typing import NamedTuple, Any
+from typing import Any
 
 from . import components as comp
 from .model import Model
