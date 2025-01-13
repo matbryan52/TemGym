@@ -301,8 +301,6 @@ class TemGymWindow(QMainWindow):
         wobbling = self._wobble_timer.isActive()
         if self._wobble_params and not wobbling:
             self._wobble_timer.start(UPDATE_RATE)
-        elif not self._wobble_params and wobbling:
-            self._wobble_timer.stop()
 
     def update_tree(self, components: list[ComponentGUIWrapper]):
         params_model = QStandardItemModel()
@@ -327,8 +325,9 @@ class TemGymWindow(QMainWindow):
     def _wobble_cb(self):
         if not self._wobble_params:
             self._wobble_timer.stop()
-            return
-        self._wobble_var += np.pi / 8
+            self._wobble_var = 0.
+        else:
+            self._wobble_var += np.pi / 8
         self._wobble_var = np.angle(np.exp(1j * self._wobble_var))
         param_mult = np.sin(self._wobble_var) * 0.1
 
