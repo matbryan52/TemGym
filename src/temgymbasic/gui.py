@@ -1,5 +1,4 @@
-from typing import Iterable, TYPE_CHECKING, NamedTuple, Optional, Tuple, Any
-import weakref
+from typing import Iterable, TYPE_CHECKING, NamedTuple, Optional, Tuple
 import copy
 
 from PySide6.QtGui import QVector3D
@@ -99,6 +98,7 @@ class GridGeomMixin:
         return np.concatenate((xlines, ylines), axis=0)
 
     def get_geom(self):
+        self._geom_state = self._get_extents()
         vertices = self._get_mesh()
         vertices *= XYZ_SCALING
         self.geom_border = gl.GLLinePlotItem(
@@ -123,6 +123,9 @@ class GridGeomMixin:
         return [self.geom_image, self.geom_grid, self.geom_border]
 
     def update_geometry(self):
+        geom_state = self._get_extents()
+        if geom_state == self._geom_state:
+            self._geom_state = geom_state
         vertices = self._get_mesh()
         vertices *= XYZ_SCALING
         self.geom_image.setVertices(
@@ -158,12 +161,8 @@ class GridGeomMixin:
 
 
 class ComponentGUIWrapper:
-    def __init__(self, component: 'comp.Component', window: 'TemGymWindow'):
+    def __init__(self, component: 'comp.Component'):
         self.component = component
-        self.window = weakref.ref(window)
-
-    def get_parameters(self) -> dict[str, Any]:
-        return self.component.get_parameters()
 
     def update_geometry(self):
         pass
@@ -197,6 +196,8 @@ class TemGymWindow(QMainWindow):
             Microscope model
         '''
         super().__init__()
+        self._gui_components: tuple['ComponentGUIWrapper'] = tuple()
+        self.num_rays = 64
 
         # Set some main window's properties
         self.setWindowTitle("TemGymBasic")
@@ -239,17 +240,24 @@ class TemGymWindow(QMainWindow):
         geometry: bool = True,
         camera: bool = True
     ):
-        gui_components = tuple(
-            c.gui_wrapper()(c, self) for c in model.components
+        self._gui_components = tuple(
+            c.gui_wrapper()(c) for c in model.components
         )
         if geometry:
-            self.add_geometry(gui_components)
+            self.add_geometry(self._gui_components)
         if camera:
-            self.update_camera(gui_components)
+            self.update_camera(self._gui_components)
         if tree:
-            self.update_tree(gui_components)
-        num_rays = 64
-        self.update_rays(model, num_rays)
+            self.update_tree(self._gui_components)
+        self.update_rays(model, self.num_rays)
+
+    def update_model(self, model: 'Model'):
+        assert len(model.components) == len(self._gui_components)
+        for component, gui_comp in zip(model.components, self._gui_components):
+            assert isinstance(gui_comp, component.gui_wrapper())
+            gui_comp.component = component
+            gui_comp.update_geometry()
+        self.update_rays(model, self.num_rays)
 
     @staticmethod
     def qtmodel_to_dict(model: QStandardItemModel):
@@ -289,12 +297,32 @@ class TemGymWindow(QMainWindow):
             param_change = True
         if param_change:
             new_model = to_model({"components": params})
-            self.set_model(new_model)
+            self.update_model(new_model)
         wobbling = self._wobble_timer.isActive()
         if self._wobble_params and not wobbling:
             self._wobble_timer.start(UPDATE_RATE)
         elif not self._wobble_params and wobbling:
             self._wobble_timer.stop()
+
+    def update_tree(self, components: list[ComponentGUIWrapper]):
+        params_model = QStandardItemModel()
+        params_model.setHorizontalHeaderLabels(['Parameter', 'Value'])
+        params_model.itemChanged.connect(self.handleChanged)
+        for gui_comp in components:
+            comp_row = QStandardItem(type(gui_comp.component).__name__)
+            comp_row.setEditable(False)
+            for name, val in gui_comp.component.get_parameters().items():
+                key = QStandardItem(name)
+                key.setCheckable(True)
+                key.setEditable(False)
+                comp_row.appendRow([
+                    key,
+                    QStandardItem(f"{val}"),
+                ])
+            params_model.appendRow(comp_row)
+        self._current_config = self.qtmodel_to_dict(params_model)
+        self.params_tree.setModel(params_model)
+        self.params_tree.expandAll()
 
     def _wobble_cb(self):
         if not self._wobble_params:
@@ -317,10 +345,8 @@ class TemGymWindow(QMainWindow):
         delta = Delta(delta)
         temp_config = temp_config + delta
         new_model = to_model({"components": temp_config})
-        self.set_model(
+        self.update_model(
             new_model,
-            tree=False,
-            camera=False,
         )
 
     def keyPressEvent(self, event: QKeyEvent):
@@ -398,26 +424,6 @@ class TemGymWindow(QMainWindow):
         if model.detector is not None:
             pass
 
-    def update_tree(self, components: list[ComponentGUIWrapper]):
-        params_model = QStandardItemModel()
-        params_model.setHorizontalHeaderLabels(['Parameter', 'Value'])
-        params_model.itemChanged.connect(self.handleChanged)
-        for gui_comp in components:
-            comp_row = QStandardItem(type(gui_comp.component).__name__)
-            comp_row.setEditable(False)
-            for name, val in gui_comp.get_parameters().items():
-                key = QStandardItem(name)
-                key.setCheckable(True)
-                key.setEditable(False)
-                comp_row.appendRow([
-                    key,
-                    QStandardItem(f"{val}"),
-                ])
-            params_model.appendRow(comp_row)
-        self._current_config = self.qtmodel_to_dict(params_model)
-        self.params_tree.setModel(params_model)
-        self.params_tree.expandAll()
-
     def add_geometry(self, components: list[ComponentGUIWrapper]):
         self.tem_window.clear()
         # Loop through all of the model components
@@ -457,6 +463,7 @@ class BasicLensGUI(ComponentGUIWrapper):
         return self.component
 
     def get_geom(self):
+        self._geom_state = (self.lens.f, self.lens.z)
         vertices = comp_geom.lens(
             0.2,
             Z_ORIENT * self.component.z,
@@ -488,6 +495,9 @@ class BasicLensGUI(ComponentGUIWrapper):
         return self.geom
 
     def update_geometry(self):
+        if (self.lens.f, self.lens.z) == self._geom_state:
+            return
+        self._geom_state = (self.lens.f, self.lens.z)
         z = Z_ORIENT * self.lens.z
         f = Z_ORIENT * self.lens.f
 
@@ -507,6 +517,7 @@ class SourceGUI(ComponentGUIWrapper):
         raise NotImplementedError("Needs to be defined")
 
     def get_geom(self):
+        self._geom_state = self.geom_state()
         self.geom = gl.GLLinePlotItem(
             pos=self._get_geom() * XYZ_SCALING,
             color=RAY_COLOR + (0.9,),
@@ -516,6 +527,10 @@ class SourceGUI(ComponentGUIWrapper):
         return [self.geom]
 
     def update_geometry(self):
+        geom_state = self.geom_state()
+        if self._geom_state != geom_state:
+            return
+        self._geom_state = geom_state
         self.geom.setData(
             pos=self._get_geom() * XYZ_SCALING,
             color=RAY_COLOR + (0.9,),
@@ -524,6 +539,13 @@ class SourceGUI(ComponentGUIWrapper):
 
 
 class ParallelBeamGUI(SourceGUI):
+    def geom_state(self):
+        return (
+            self.beam.radius,
+            self.beam.z,
+            self.beam.centre_yx,
+        )
+
     def _get_geom(self):
         return comp_geom.lens(
             self.beam.radius,
